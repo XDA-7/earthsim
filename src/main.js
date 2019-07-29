@@ -13,13 +13,21 @@
  * @typedef {object} Tile
  * @property {number} altitude
  * @property {number} baseLuminosity
- * @property {number} temperature
+ * @property {number} heat
  * @property {TileCover} tileCover
+ * @property {Biomass} biomass
+ */
+
+/**
+ * @typedef {object} Biomass
+ * @property {number} total
+ * @property {number} prokaryote
  */
 
 /**
  * @typedef {object} World
  * @property {Atmosphere} atmosphere
+ * @property {Biomass} biomass
  * @property {Tile[][]} tiles
  * @property {() => void} draw
  * @property {() => void} tick
@@ -44,23 +52,33 @@ const atmosphereLossRate = 0.01
 const atmospherePerTile = 1 / (worldHeight * worldWidth)
 
 const seaLevel = 1000
-const freezingPoint = 120
+const freezingPoint = 90
+const unlivableTemperature = 180
 
 const volcanoDiameter = 9
 const volcanoHalfDiameter = Math.floor(volcanoDiameter / 2)
 const volcanoMinUpthrust = 1000
 const volcanoUpthrustVariation = 1000
-const volcanoMinCarbonOutput = 500
-const volcanoCarbonOutputVariation = 500
 
-const tempRepresentationOffset = -120
-const fullLuminosityHeat = 130
+// also measures the energy given to a tile for biological purposes
+const fullLuminosityHeat = 60
 const polarLuminosity = 0.5
-const iceReflectivity = 0.4
-const waterReflectivity = 0.1
+const iceReflectivity = 0.25
+const waterReflectivity = 0
 
 // retention value is per unit
-const carbonHeatRetention = 0.06
+const carbonHeatRetention = 0.2
+const carbonPerLandTile = 1
+const waterVaporHeatRetention = 0.2
+const waterVaporPerOceanTile = 1
+
+const photosynthticBiomassPerEnergy = 120
+const carbonPerPhotosyntheticBiomass = 0.01
+const oxygenPerPhotosyntheticBiomass = 0.01
+
+const prokaryoteAbiogenesisChance = 0.000004
+const prokaryoteAbiogenesisMinHeat = 160
+const prokaryoteReproductionRate = 0.005
 
 const canvas = document.createElement('canvas')
 document.body.appendChild(canvas)
@@ -116,6 +134,7 @@ function hsl(h, s, l) {
 function World() {
     const atmosphere = Atmosphere()
     const tiles = Tiles()
+    const biomass = Biomass()
 
     /**@param {(x: number, y: number, tile: Tile) => void} func */
     const applyTiles = function(func) {
@@ -132,10 +151,15 @@ function World() {
                 context.fillStyle = hsl(21, 0.55, tile.altitude / maxAltitude)
             }
             else if (tile.tileCover == TileCover.Water) {
-                context.fillStyle = hsl(233, 0.84, 0.45)
+                if (tile.biomass.prokaryote == 0) {
+                    context.fillStyle = hsl(233, 0.84, 0.45)
+                }
+                else {
+                    context.fillStyle = hsl(117, 0.8, 0.34)
+                }
             }
             else if (tile.tileCover == TileCover.Ice) {
-                context.fillStyle = hsl(0, 0, 1)
+                context.fillStyle = hsl(0, 0, 0.9)
             }
             else {
                 context.fillStyle = hsl(0, 0, 0)
@@ -167,7 +191,6 @@ function World() {
                 }
             })
         })
-        atmosphere.carbonDioxide += volcanoMinCarbonOutput + Math.floor(Math.random() * volcanoCarbonOutputVariation)
     }
 
     /**
@@ -188,7 +211,7 @@ function World() {
      * @returns {number}
      */
     const computeHeatTrappingFactor = function(atmosphere) {
-        return atmosphere.carbonDioxide * carbonHeatRetention
+        return atmosphere.carbonDioxide * carbonHeatRetention + atmosphere.waterVapour * waterVaporHeatRetention
     }
 
     /**
@@ -213,8 +236,9 @@ function World() {
      * @param {number} heatTrappingFactor
      * @returns {number}
      */
-    const computeTemperature = function(tile, luminosity, heatTrappingFactor) {
-        return fullLuminosityHeat * luminosity * (1 + heatTrappingFactor)
+    const computeHeat = function(tile, luminosity, heatTrappingFactor) {
+        const turnHeat = fullLuminosityHeat * luminosity * (1 + heatTrappingFactor)
+        return turnHeat * 0.2 + tile.heat * 0.8
     }
 
     /**
@@ -223,7 +247,7 @@ function World() {
      */
     const computeTileCover = function(tile) {
         if (tile.altitude < seaLevel) {
-            if (tile.temperature > freezingPoint) {
+            if (tile.heat > freezingPoint) {
                 return TileCover.Water
             }
             else {
@@ -235,32 +259,114 @@ function World() {
         }
     }
 
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @param {Tile} tile
+     */
+    const transferHeat = function(x, y, tile) {
+        const horizontalTile = tiles[(x + 1) % worldWidth][y]
+        const horizontalAveHeat = (tile.heat + horizontalTile.heat) / 2
+        horizontalTile.heat = horizontalAveHeat
+        
+        if (y + 1 != worldHeight) {
+            const verticalTile = tiles[x][y + 1]
+            const verticalAveHeat = (tile.heat + verticalTile.heat) / 2
+            verticalTile.heat = verticalAveHeat
+            tile.heat = (horizontalAveHeat + verticalAveHeat) / 2
+        }
+        else {
+            tile.heat = horizontalAveHeat
+        }
+    }
+
+    /**@returns {boolean} */
+    const canProkaryotesSurvive = function(tile) {
+        return tile.heat < unlivableTemperature && tile.tileCover == TileCover.Water
+    }
+
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @param {Tile} tile
+     */
+    const transferProkaryotes = function(x, y, tile) {
+        if (canProkaryotesSurvive(tile)) {
+            const horizontalTile = tiles[(x + 1) % worldWidth][y]
+            if (canProkaryotesSurvive(horizontalTile) && (tile.biomass.prokaryote > 2 || horizontalTile.biomass.prokaryote > 2)) {
+                const horizontalAvePop = (tile.biomass.prokaryote + horizontalTile.biomass.prokaryote) / 2
+                horizontalTile.biomass.prokaryote = horizontalAvePop
+                tile.biomass.prokaryote = horizontalAvePop
+            }
+            
+            if (y + 1 != worldHeight) {
+                const verticalTile = tiles[x][y + 1]
+                if (canProkaryotesSurvive(verticalTile) && (tile.biomass.prokaryote > 2 || verticalTile.biomass.prokaryote > 2)) {
+                    const verticalAvePop = (tile.biomass.prokaryote + verticalTile.biomass.prokaryote) / 2
+                    verticalTile.biomass.prokaryote = verticalAvePop
+                    tile.biomass.prokaryote = verticalAvePop
+                }
+            }
+        }
+    }
+
+    /**
+     * @param {Tile} tile
+     * @param {Atmosphere} tileAtmosphere
+     */
+    const applyBiomass = function(tile, tileAtmosphere) {
+        if (tile.heat > unlivableTemperature || tile.tileCover != TileCover.Water || tileAtmosphere.carbonDioxide == 0) {
+            tile.biomass.prokaryote = 0
+            tile.biomass.total = 0
+        }
+        
+        const computedProkaryoteReproductionRate = Math.min((tileAtmosphere.carbonDioxide) * prokaryoteReproductionRate, prokaryoteReproductionRate)
+
+        tile.biomass.prokaryote += tile.biomass.prokaryote * computedProkaryoteReproductionRate
+        tile.biomass.prokaryote = Math.min(tile.biomass.prokaryote, tile.baseLuminosity * fullLuminosityHeat * photosynthticBiomassPerEnergy)
+        tile.biomass.total = tile.biomass.prokaryote
+
+        atmosphere.carbonDioxide -= tile.biomass.prokaryote * carbonPerPhotosyntheticBiomass
+        atmosphere.oxygen += tile.biomass.prokaryote * oxygenPerPhotosyntheticBiomass
+
+        biomass.prokaryote += tile.biomass.prokaryote
+        biomass.total += tile.biomass.total
+    }
+
     const tick = function() {
         eruptVolcano()
         atmosphere.carbonDioxide -= atmosphere.carbonDioxide * atmosphereLossRate
         atmosphere.methane -= atmosphere.methane * atmosphereLossRate
         atmosphere.nitrogen -= atmosphere.nitrogen * atmosphereLossRate
         atmosphere.oxygen -= atmosphere.oxygen * atmosphereLossRate
-        atmosphere.waterVapour -= atmosphere.waterVapour * atmosphereLossRate
+        atmosphere.waterVapour = 0
+
+        biomass.prokaryote = 0
+        biomass.total = 0
+
         const tileAtmosphere = computeTileAtmosphere()
         const heatTrappingFactor = computeHeatTrappingFactor(tileAtmosphere)
         applyTiles(function(x, y, tile) {
             tile.altitude = Math.max(tile.altitude - erosionRate, 0)
             const luminosity = computeLuminosity(tile)
-            tile.temperature = computeTemperature(tile, luminosity, heatTrappingFactor)
+            tile.heat = computeHeat(tile, luminosity, heatTrappingFactor)
+            if (tile.tileCover == TileCover.Water) {
+                atmosphere.waterVapour += waterVaporPerOceanTile
+            }
+            else if (tile.tileCover == TileCover.Rock) {
+                atmosphere.carbonDioxide += carbonPerLandTile
+            }
+            
+            if (tile.biomass.total == 0 && tile.heat > prokaryoteAbiogenesisMinHeat && tile.heat < unlivableTemperature) {
+                if (Math.random() < prokaryoteAbiogenesisChance) {
+                    tile.biomass.prokaryote = 1
+                    tile.biomass.total = 1
+                }
+            }
+            applyBiomass(tile, tileAtmosphere)
+            transferProkaryotes(x, y, tile)
         })
-        // transfer some heat between tiles
-        applyTiles(function(x, y, tile) {
-            const horizontalTile = tiles[(x + 1) % worldWidth][y]
-            const horizontalAveTemp = (tile.temperature + horizontalTile.temperature) / 2
-            horizontalTile.temperature = horizontalAveTemp
-
-            const verticalTile = tiles[x][(y + 1) % worldHeight]
-            const verticalAveTemp = (tile.temperature + verticalTile.temperature) / 2
-            verticalTile.temperature = verticalAveTemp
-
-            tile.temperature = (horizontalAveTemp + verticalAveTemp) / 2
-        })
+        applyTiles(transferHeat)
         applyTiles(function(x, y, tile) {
             tile.tileCover = computeTileCover(tile)
         })
@@ -268,14 +374,18 @@ function World() {
 
     const updateStats = function() {
         document.getElementById('co2').innerText = atmosphere.carbonDioxide.toString()
-        document.getElementById('avetemp').innerText = (tiles[50].reduce(function(acc, tile) { return acc + tile.temperature }, 0) / worldHeight).toString()
-        document.getElementById('eqtemp').innerText = (tiles.reduce(function(acc, cur) { return acc + cur[worldHeight / 2].temperature }, 0) / worldWidth).toString()
-        document.getElementById('poltemp').innerText = (tiles.reduce(function(acc, cur) { return acc + cur[0].temperature }, 0) / worldHeight).toString()
+        document.getElementById('oxygen').innerText = atmosphere.oxygen.toString()
+        document.getElementById('watervapour').innerText = atmosphere.waterVapour.toString()
+        document.getElementById('avetemp').innerText = (tiles[50].reduce(function(acc, tile) { return acc + tile.heat }, 0) / worldHeight).toString()
+        document.getElementById('eqtemp').innerText = (tiles.reduce(function(acc, cur) { return acc + cur[worldHeight / 2].heat }, 0) / worldWidth).toString()
+        document.getElementById('poltemp').innerText = (tiles.reduce(function(acc, cur) { return acc + cur[0].heat }, 0) / worldHeight).toString()
+        document.getElementById('prokaryote').innerText = biomass.prokaryote.toString()
     }
 
     return {
         atmosphere: atmosphere,
         tiles: tiles,
+        biomass: biomass,
         draw: draw,
         tick: tick,
         updateStats: updateStats,
@@ -312,8 +422,19 @@ function Tile(x, y) {
     return {
         altitude: 0,
         baseLuminosity: 1 - ((1 - polarLuminosity) * equatorialDistance),
-        temperature: 0,
+        heat: 0,
         tileCover: TileCover.NotComputed,
+        biomass: Biomass(),
+    }
+}
+
+/**
+ * @returns {Biomass}
+ */
+function Biomass() {
+    return {
+        total: 0,
+        prokaryote: 0
     }
 }
 
