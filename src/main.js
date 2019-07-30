@@ -20,8 +20,16 @@
 
 /**
  * @typedef {object} Biomass
- * @property {number} total
- * @property {number} prokaryote
+ * @property {(type: LifeType) => LifePop} getLifePop
+ * @property {(localAtmosphere: Atmosphere, worldAtmosphere: Atmosphere, tile: Tile) => void} tick
+ * @property {(horizontalTile: Tile, verticalTile: Tile) => void} transfer
+ * @property {() => void} abiogenesis
+ */
+
+/**
+ * @typedef {object} LifePop
+ * @property {LifeType} type
+ * @property {number} population
  */
 
 /**
@@ -72,13 +80,75 @@ const carbonPerLandTile = 1
 const waterVaporHeatRetention = 0.2
 const waterVaporPerOceanTile = 1
 
-const photosynthticBiomassPerEnergy = 120
+const photosynthticBiomassPerEnergy = 180
 const carbonPerPhotosyntheticBiomass = 0.01
 const oxygenPerPhotosyntheticBiomass = 0.01
 
-const prokaryoteAbiogenesisChance = 0.000004
+const planktonAbiogenesisChance = 0.0001
 const prokaryoteAbiogenesisMinHeat = 160
-const prokaryoteReproductionRate = 0.005
+
+/**
+ * @typedef {object} LifeType
+ * @property {boolean} isPlant
+ * @property {boolean} isSentiencePossible
+ * @property {boolean} isLandInhabiting
+ * @property {boolean} isWaterInhabiting
+ * @property {boolean} isFlying
+ * @property {number} minTemperature
+ * @property {number} maxTemperature
+ * @property {number} minAltitude
+ * @property {number} maxAltitude
+ * @property {number} minBreathableAtmosphere
+ * @property {number} reproductionRate
+ */
+
+/**
+ * @enum {LifeType}
+ */
+const LifeTypes = {
+    Plankton: {
+        isPlant: true,
+        isSentiencePossible: false,
+        isLandInhabiting: false,
+        isWaterInhabiting: true,
+        isFlying: false,
+        minTemperature: freezingPoint,
+        maxTemperature: unlivableTemperature,
+        minAltitude: 0,
+        maxAltitude: seaLevel,
+        minBreathableAtmosphere: 0.01,
+        reproductionRate: 0.005,
+    },
+    Kelp: {
+        isPlant: true,
+        isSentiencePossible: false,
+        isLandInhabiting: false,
+        isWaterInhabiting: true,
+        isFlying: false,
+        minTemperature: freezingPoint + 10,
+        maxTemperature: unlivableTemperature,
+        minAltitude: seaLevel - 500,
+        maxAltitude: seaLevel,
+        minBreathableAtmosphere: 0.01,
+        reproductionRate: 0.005,
+    },
+    Coral: {
+        isPlant: true,
+        isSentiencePossible: false,
+        isLandInhabiting: false,
+        isWaterInhabiting: true,
+        isFlying: false,
+        minTemperature: unlivableTemperature - 60,
+        maxTemperature: unlivableTemperature - 30,
+        minAltitude: seaLevel - 100,
+        maxAltitude: seaLevel,
+        minBreathableAtmosphere: 0.01,
+        reproductionRate: 0.005,
+    },
+    /*Crustacean: {},
+    /*Mollusk: {},
+    /*Cephalopod: {},*/
+}
 
 const canvas = document.createElement('canvas')
 document.body.appendChild(canvas)
@@ -134,7 +204,7 @@ function hsl(h, s, l) {
 function World() {
     const atmosphere = Atmosphere()
     const tiles = Tiles()
-    const biomass = Biomass()
+    const biomass = Biomass(undefined)
 
     /**@param {(x: number, y: number, tile: Tile) => void} func */
     const applyTiles = function(func) {
@@ -145,13 +215,36 @@ function World() {
         })
     }
 
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @returns {Tile}
+     */
+    const getVerticalTile = function(x, y) {
+        if (y + 1 != worldHeight) {
+            return tiles[x][y + 1]
+        }
+        else {
+            return undefined
+        }
+    }
+
+    /**
+     * @param {number} x
+     * @param {number} y
+     * @returns {Tile}
+     */
+    const getHorizontalTile = function(x, y) {
+        return tiles[(x + 1) % worldWidth][y]
+    }
+
     const draw = function() {
         applyTiles(function(x, y, tile) {
             if (tile.tileCover == TileCover.Rock) {
                 context.fillStyle = hsl(21, 0.55, tile.altitude / maxAltitude)
             }
             else if (tile.tileCover == TileCover.Water) {
-                if (tile.biomass.prokaryote == 0) {
+                if (tile.biomass.getLifePop(LifeTypes.Plankton).population == 0) {
                     context.fillStyle = hsl(233, 0.84, 0.45)
                 }
                 else {
@@ -280,59 +373,6 @@ function World() {
         }
     }
 
-    /**@returns {boolean} */
-    const canProkaryotesSurvive = function(tile) {
-        return tile.heat < unlivableTemperature && tile.tileCover == TileCover.Water
-    }
-
-    /**
-     * @param {number} x
-     * @param {number} y
-     * @param {Tile} tile
-     */
-    const transferProkaryotes = function(x, y, tile) {
-        if (canProkaryotesSurvive(tile)) {
-            const horizontalTile = tiles[(x + 1) % worldWidth][y]
-            if (canProkaryotesSurvive(horizontalTile) && (tile.biomass.prokaryote > 2 || horizontalTile.biomass.prokaryote > 2)) {
-                const horizontalAvePop = (tile.biomass.prokaryote + horizontalTile.biomass.prokaryote) / 2
-                horizontalTile.biomass.prokaryote = horizontalAvePop
-                tile.biomass.prokaryote = horizontalAvePop
-            }
-            
-            if (y + 1 != worldHeight) {
-                const verticalTile = tiles[x][y + 1]
-                if (canProkaryotesSurvive(verticalTile) && (tile.biomass.prokaryote > 2 || verticalTile.biomass.prokaryote > 2)) {
-                    const verticalAvePop = (tile.biomass.prokaryote + verticalTile.biomass.prokaryote) / 2
-                    verticalTile.biomass.prokaryote = verticalAvePop
-                    tile.biomass.prokaryote = verticalAvePop
-                }
-            }
-        }
-    }
-
-    /**
-     * @param {Tile} tile
-     * @param {Atmosphere} tileAtmosphere
-     */
-    const applyBiomass = function(tile, tileAtmosphere) {
-        if (tile.heat > unlivableTemperature || tile.tileCover != TileCover.Water || tileAtmosphere.carbonDioxide == 0) {
-            tile.biomass.prokaryote = 0
-            tile.biomass.total = 0
-        }
-        
-        const computedProkaryoteReproductionRate = Math.min((tileAtmosphere.carbonDioxide) * prokaryoteReproductionRate, prokaryoteReproductionRate)
-
-        tile.biomass.prokaryote += tile.biomass.prokaryote * computedProkaryoteReproductionRate
-        tile.biomass.prokaryote = Math.min(tile.biomass.prokaryote, tile.baseLuminosity * fullLuminosityHeat * photosynthticBiomassPerEnergy)
-        tile.biomass.total = tile.biomass.prokaryote
-
-        atmosphere.carbonDioxide -= tile.biomass.prokaryote * carbonPerPhotosyntheticBiomass
-        atmosphere.oxygen += tile.biomass.prokaryote * oxygenPerPhotosyntheticBiomass
-
-        biomass.prokaryote += tile.biomass.prokaryote
-        biomass.total += tile.biomass.total
-    }
-
     const tick = function() {
         eruptVolcano()
         atmosphere.carbonDioxide -= atmosphere.carbonDioxide * atmosphereLossRate
@@ -341,11 +381,12 @@ function World() {
         atmosphere.oxygen -= atmosphere.oxygen * atmosphereLossRate
         atmosphere.waterVapour = 0
 
-        biomass.prokaryote = 0
-        biomass.total = 0
-
         const tileAtmosphere = computeTileAtmosphere()
         const heatTrappingFactor = computeHeatTrappingFactor(tileAtmosphere)
+
+        const plankton = biomass.getLifePop(LifeTypes.Plankton)
+        plankton.population = 0
+
         applyTiles(function(x, y, tile) {
             tile.altitude = Math.max(tile.altitude - erosionRate, 0)
             const luminosity = computeLuminosity(tile)
@@ -357,16 +398,16 @@ function World() {
                 atmosphere.carbonDioxide += carbonPerLandTile
             }
             
-            if (tile.biomass.total == 0 && tile.heat > prokaryoteAbiogenesisMinHeat && tile.heat < unlivableTemperature) {
-                if (Math.random() < prokaryoteAbiogenesisChance) {
-                    tile.biomass.prokaryote = 1
-                    tile.biomass.total = 1
-                }
-            }
-            applyBiomass(tile, tileAtmosphere)
-            transferProkaryotes(x, y, tile)
+            tile.biomass.abiogenesis()
+            tile.biomass.tick(tileAtmosphere, atmosphere, tile)
+
+            const tilePlankton = tile.biomass.getLifePop(LifeTypes.Plankton)
+            plankton.population += tilePlankton.population
         })
-        applyTiles(transferHeat)
+        applyTiles(function(x, y, tile) {
+            transferHeat(x, y, tile)
+            tile.biomass.transfer(getHorizontalTile(x, y), getVerticalTile(x, y))
+        })
         applyTiles(function(x, y, tile) {
             tile.tileCover = computeTileCover(tile)
         })
@@ -379,7 +420,7 @@ function World() {
         document.getElementById('avetemp').innerText = (tiles[50].reduce(function(acc, tile) { return acc + tile.heat }, 0) / worldHeight).toString()
         document.getElementById('eqtemp').innerText = (tiles.reduce(function(acc, cur) { return acc + cur[worldHeight / 2].heat }, 0) / worldWidth).toString()
         document.getElementById('poltemp').innerText = (tiles.reduce(function(acc, cur) { return acc + cur[0].heat }, 0) / worldHeight).toString()
-        document.getElementById('prokaryote').innerText = biomass.prokaryote.toString()
+        document.getElementById('plankton').innerText = biomass.getLifePop(LifeTypes.Plankton).population.toString()
     }
 
     return {
@@ -419,22 +460,105 @@ function Tiles() {
  */
 function Tile(x, y) {
     const equatorialDistance = Math.abs(y - (worldHeight / 2)) / (worldHeight / 2)
-    return {
+    /**@type {Tile} */
+    const tile = {
         altitude: 0,
         baseLuminosity: 1 - ((1 - polarLuminosity) * equatorialDistance),
         heat: 0,
         tileCover: TileCover.NotComputed,
-        biomass: Biomass(),
+        biomass: undefined,
     }
+    tile.biomass = Biomass(tile)
+    return tile
 }
 
 /**
+ * @param {Tile} tile
  * @returns {Biomass}
  */
-function Biomass() {
+function Biomass(tile) {
+    /**@type {LifePop[]} */
+    const lifePops = []
+
+    /**
+     * @param {LifeType} lifeType
+     * @param {Tile} tile
+     * @returns {boolean}
+     */
+    const canLifeTypeSurviveOnTile = function(lifeType, tile) {
+        const correctTerrain = (lifeType.isLandInhabiting && tile.tileCover == TileCover.Rock) || (lifeType.isWaterInhabiting && tile.tileCover == TileCover.Water)
+        const correctHeat = tile.heat >= lifeType.minTemperature && tile.heat <= lifeType.maxTemperature
+        return correctTerrain && correctHeat
+    }
+
+    /**
+     * @param {LifeType} lifeType
+     * @param {Atmosphere} localAtmosphere
+     * @returns {boolean}
+     */
+    const canLifeTypeSurviveInAtmosphere = function(lifeType, localAtmosphere) {
+        if (lifeType.isPlant) {
+            return localAtmosphere.carbonDioxide >= lifeType.minBreathableAtmosphere
+        }
+        else {
+            return localAtmosphere.oxygen >= lifeType.minBreathableAtmosphere
+        }
+    }
+
     return {
-        total: 0,
-        prokaryote: 0
+        getLifePop: function(type) {
+            var pop = lifePops.find(function(lifePop) { return lifePop.type == type })
+            if (!pop) {
+                pop = { type: type, population: 0 }
+                lifePops.push(pop)
+            }
+
+            return pop
+        },
+        tick: function(localAtmosphere, worldAtmosphere, tile) {
+            lifePops.forEach(function(lifePop) {
+                if (!canLifeTypeSurviveOnTile(lifePop.type, tile) || !canLifeTypeSurviveInAtmosphere(lifePop.type, localAtmosphere)) {
+                    lifePop.population = 0
+                }
+
+                lifePop.population += lifePop.population * lifePop.type.reproductionRate
+                if (lifePop.type.isPlant) {
+                    lifePop.population = Math.min(lifePop.population, tile.baseLuminosity * fullLuminosityHeat * photosynthticBiomassPerEnergy)
+                }
+
+                if (lifePop.type.isPlant) {
+                    worldAtmosphere.carbonDioxide -= lifePop.population * carbonPerPhotosyntheticBiomass
+                    worldAtmosphere.oxygen += lifePop.population * oxygenPerPhotosyntheticBiomass
+                }
+            })
+        },
+        transfer: function(horizontalTile, verticalTile) {
+            lifePops.forEach(function(lifePop) {
+                const type = lifePop.type
+                if (canLifeTypeSurviveOnTile(type, tile)) {
+                    const horizontalPop = horizontalTile.biomass.getLifePop(type)
+                    if (canLifeTypeSurviveOnTile(type, horizontalTile) && (lifePop.population > 2 || horizontalPop.population > 2)) {
+                        const horizontalAvePop = (lifePop.population + horizontalPop.population) / 2
+                        horizontalPop.population = horizontalAvePop
+                        lifePop.population = horizontalAvePop
+                    }
+                    
+                    if (verticalTile) {
+                        const verticalPop = verticalTile.biomass.getLifePop(type)
+                        if (canLifeTypeSurviveOnTile(type, verticalTile) && (lifePop.population > 2 || verticalPop.population > 2)) {
+                            const verticalAvePop = (lifePop.population + verticalPop.population) / 2
+                            verticalPop.population = verticalAvePop
+                            lifePop.population = verticalAvePop
+                        }
+                    }
+                }
+            })
+        },
+        abiogenesis: function() {
+            if (this.getLifePop(LifeTypes.Plankton).population == 0 && canLifeTypeSurviveOnTile(LifeTypes.Plankton, tile) && tile.heat >= prokaryoteAbiogenesisMinHeat && Math.random() < planktonAbiogenesisChance) {
+                this.getLifePop(LifeTypes.Plankton).population = 1
+            }
+        },
     }
 }
 
