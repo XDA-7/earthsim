@@ -84,7 +84,7 @@ const photosynthticBiomassPerEnergy = 180
 const carbonPerPhotosyntheticBiomass = 0.01
 const oxygenPerPhotosyntheticBiomass = 0.01
 
-const planktonAbiogenesisChance = 0.0001
+const planktonAbiogenesisChance = 0.000005
 const prokaryoteAbiogenesisMinHeat = 160
 
 /**
