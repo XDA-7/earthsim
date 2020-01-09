@@ -75,9 +75,9 @@ const iceReflectivity = 0.25
 const waterReflectivity = 0
 
 // retention value is per unit
-const carbonHeatRetention = 0.2
+const carbonHeatRetention = 0.18
 const carbonPerLandTile = 1
-const waterVaporHeatRetention = 0.2
+const waterVaporHeatRetention = 0.18
 const waterVaporPerOceanTile = 1
 
 const photosynthticBiomassPerEnergy = 180
